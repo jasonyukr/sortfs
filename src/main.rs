@@ -38,7 +38,7 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<DirEntry> {
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .filter_entry(is_dir)
+            .filter_entry(is_dir) // directory only
             .threads(num_threads)
             .build_parallel();
 
