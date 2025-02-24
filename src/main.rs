@@ -17,19 +17,18 @@ fn is_dir(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<DirEntry> {
+fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
     // Use a maximum of 4 threads. Never use more than half of the available CPU cores.
     let num_threads = min(4, num_cpus::get() / 2);
 
-    let results = Arc::new(Mutex::new(vec![]));
-
     let mut builder = WalkBuilder::new(&current_dir);
 
-    // make sure that ".git/" contents are ignored
+    // Make sure that ".git/" contents are ignored
     let mut overrides = OverrideBuilder::new(&current_dir);
     overrides.add("!**/.git/").unwrap();
     builder.overrides(overrides.build().unwrap());
 
+    // Create walker
     let walker;
     if dirs_only {
         walker = builder
@@ -41,7 +40,6 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<DirEntry> {
             .filter_entry(is_dir) // directory only
             .threads(num_threads)
             .build_parallel();
-
     } else {
         walker = builder
             .hidden(false)
@@ -53,27 +51,28 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<DirEntry> {
             .build_parallel();
     }
 
+    // Run the walker to collect (entry, modified) vector
+    let results = Arc::new(Mutex::new(Vec::new()));
     walker.run(|| {
         let results = Arc::clone(&results);
         Box::new(move |entry| {
             match entry {
                 Ok(entry) => {
+                    let modified = metadata(entry.path())
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH); // default to UNIX_EPOCH if error
                     let mut results = results.lock().unwrap();
-                    results.push(entry);
+                    results.push((entry, modified));
                 }
-                Err(err) => eprintln!("Error: {}", err),
+                Err(_err) => (),
             }
             ignore::WalkState::Continue
         })
     });
 
-    // sort by modified date
+    // Sort the results by the "modified"
     let mut results = results.lock().unwrap();
-    results.par_sort_by(|a, b| {
-        let a_metadata = metadata(a.path()).unwrap();
-        let b_metadata = metadata(b.path()).unwrap();
-        let a_modified = a_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let b_modified = b_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    results.par_sort_by(|(_a, a_modified), (_b, b_modified)| {
         b_modified.cmp(&a_modified)
     });
 
@@ -106,9 +105,9 @@ fn main() -> io::Result<()> {
     leading_path = leading_path.trim_end_matches('/');
 
     for e in &entries {
-        let path = format!("{}", e.path().display());
+        let path = format!("{}", e.0.path().display());
         if path.len() > leading_path.len() {
-            if e.path().is_dir() {
+            if e.0.path().is_dir() {
                 let res = writeln!(&mut stdout, "{}/", &path[leading_path.len() + 1..]);
                 match res {
                     Ok(_) => (),
