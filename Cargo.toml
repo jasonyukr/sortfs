@@ -1,0 +1,14 @@
+[package]
+name = "sortfs"
+version = "0.1.0"
+authors = ["Jason Yu <jasonyu.kr@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "2"
+jwalk = "0.3"
+num_cpus = "1.0"
+walkdir = "2"
+rayon = "1.10"
