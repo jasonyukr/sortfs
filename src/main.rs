@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::fs::metadata;
 use rayon::prelude::*;
 use ignore::{WalkBuilder, DirEntry, overrides::OverrideBuilder};
+use std::path::Path;
+use std::fs;
 
 fn is_dir(entry: &DirEntry) -> bool {
     entry
@@ -79,6 +81,12 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, Syste
     results.to_vec()
 }
 
+fn normalize_path(path: &str) -> std::io::Result<String> {
+    let path = Path::new(path);
+    let canonical_path = fs::canonicalize(path)?;
+    Ok(canonical_path.to_string_lossy().into_owned())
+}
+
 fn main() -> io::Result<()> {
     let mut stdout = io::stdout();
     let matches = App::new("sortfs")
@@ -93,31 +101,61 @@ fn main() -> io::Result<()> {
                 .short("d")
                 .long("dirs-only")
                 .help("Show directories only")
-                .takes_value(false)
+        )
+        .arg(
+            Arg::with_name("full-path")
+                .short("f")
+                .long("full-path")
+                .help("Show fullpath")
         )
         .get_matches();
 
     let dirs_only = matches.is_present("dirs-only");
+    let full_path = matches.is_present("full-path");
 
-    let dir = PathBuf::from(matches.value_of("DIRECTORY").unwrap_or("."));
+    let dir;
+    let target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
+    match normalize_path(target_dir) {
+        Ok(normalized) => dir = PathBuf::from(normalized),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+    }
     let entries = build_entries(dirs_only, &dir);
     let mut leading_path = dir.to_str().unwrap();
     leading_path = leading_path.trim_end_matches('/');
 
     for e in &entries {
         let path = format!("{}", e.0.path().display());
-        if path.len() > leading_path.len() {
+        if full_path {
             if e.0.path().is_dir() {
-                let res = writeln!(&mut stdout, "{}/", &path[leading_path.len() + 1..]);
+                let res = writeln!(&mut stdout, "{}/", &path);
                 match res {
                     Ok(_) => (),
                     Err(_e) => { process::exit(1) },
                 }
             } else {
-                let res = writeln!(&mut stdout, "{}", &path[leading_path.len() + 1..]);
+                let res = writeln!(&mut stdout, "{}", &path);
                 match res {
                     Ok(_) => (),
                     Err(_e) => { process::exit(1) },
+                }
+            }
+        } else {
+            if path.len() > leading_path.len() {
+                if e.0.path().is_dir() {
+                    let res = writeln!(&mut stdout, "{}/", &path[leading_path.len() + 1..]);
+                    match res {
+                        Ok(_) => (),
+                        Err(_e) => { process::exit(1) },
+                    }
+                } else {
+                    let res = writeln!(&mut stdout, "{}", &path[leading_path.len() + 1..]);
+                    match res {
+                        Ok(_) => (),
+                        Err(_e) => { process::exit(1) },
+                    }
                 }
             }
         }
