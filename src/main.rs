@@ -1,13 +1,13 @@
 use clap::{App, Arg};
 use std::cmp::{min};
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use rayon::prelude::*;
-use ignore::{WalkBuilder, DirEntry, overrides::OverrideBuilder};
+use std::process;
 use std::sync::{Arc, Mutex};
 use std::fs::metadata;
-
+use rayon::prelude::*;
+use ignore::{WalkBuilder, DirEntry, overrides::OverrideBuilder};
 
 fn is_dir(entry: &DirEntry) -> bool {
     entry
@@ -81,6 +81,7 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<DirEntry> {
 }
 
 fn main() -> io::Result<()> {
+    let mut stdout = io::stdout();
     let matches = App::new("sortfs")
         .version("1.0")
         .arg(
@@ -108,9 +109,17 @@ fn main() -> io::Result<()> {
         let path = format!("{}", e.path().display());
         if path.len() > leading_path.len() {
             if e.path().is_dir() {
-                println!("{}/", &path[leading_path.len() + 1..]);
+                let res = writeln!(&mut stdout, "{}/", &path[leading_path.len() + 1..]);
+                match res {
+                    Ok(_) => (),
+                    Err(_e) => { process::exit(1) },
+                }
             } else {
-                println!("{}", &path[leading_path.len() + 1..]);
+                let res = writeln!(&mut stdout, "{}", &path[leading_path.len() + 1..]);
+                match res {
+                    Ok(_) => (),
+                    Err(_e) => { process::exit(1) },
+                }
             }
         }
     }
