@@ -149,14 +149,26 @@ fn main() -> io::Result<()> {
                 .long("color")
                 .help("Use ls-colors")
         )
+        .arg(
+            Arg::with_name("prefix-target")
+                .short("p")
+                .long("prefix-target")
+                .help("Put the target-dir as prefix")
+        )
         .get_matches();
 
     let dirs_only = matches.is_present("dirs-only");
     let full_path = matches.is_present("full-path");
     let color = matches.is_present("color");
+    let mut prefix_target = matches.is_present("prefix-target");
+    if full_path {
+        prefix_target = false;
+    }
+
+    let mut target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
+    target_dir = target_dir.trim_end_matches('/');
 
     let dir;
-    let target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
     if full_path {
         match normalize_path(target_dir) {
             Ok(normalized) => dir = PathBuf::from(normalized),
@@ -174,7 +186,12 @@ fn main() -> io::Result<()> {
 
     for e in &entries {
         let path = e.0.path();
-        let path_disp = format!("{}", path.display());
+        let path_disp;
+        if prefix_target {
+            path_disp = format!("{}/{}", target_dir, path.display());
+        } else {
+            path_disp = format!("{}", path.display());
+        }
         let res;
         if full_path {
             if color {
