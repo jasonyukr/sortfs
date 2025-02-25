@@ -115,12 +115,16 @@ fn main() -> io::Result<()> {
 
     let dir;
     let target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
-    match normalize_path(target_dir) {
-        Ok(normalized) => dir = PathBuf::from(normalized),
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            process::exit(1);
+    if full_path {
+        match normalize_path(target_dir) {
+            Ok(normalized) => dir = PathBuf::from(normalized),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
         }
+    } else {
+        dir = PathBuf::from(target_dir);
     }
     let entries = build_entries(dirs_only, &dir);
     let mut leading_path = dir.to_str().unwrap();
