@@ -53,35 +53,35 @@ fn is_dir(entry: &DirEntry) -> bool {
 }
 
 fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
-    // Use a maximum of 4 threads. Never use more than half of the available CPU cores.
+    // Use reasonable number of threads
     let num_threads = min(4, num_cpus::get() / 2);
 
+    // Builder for current_dir
     let mut builder = WalkBuilder::new(&current_dir);
 
-    // Make sure that ".git/" contents are ignored
+    // Ignore ".git/*" and ".hg/*" contents
     let mut overrides = OverrideBuilder::new(&current_dir);
-    overrides.add("!**/.git/").unwrap();
+    overrides.add("!**/.git/*").unwrap();
+    overrides.add("!**/.hg/*").unwrap();
     builder.overrides(overrides.build().unwrap());
 
-    // Create walker
+    // Create walker from builder
     let walker;
     if dirs_only {
         walker = builder
+            .standard_filters(true)
+            .add_custom_ignore_filename(".fdignore")
             .hidden(false)
             .follow_links(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
             .filter_entry(is_dir) // directory only
             .threads(num_threads)
             .build_parallel();
     } else {
         walker = builder
+            .standard_filters(true)
+            .add_custom_ignore_filename(".fdignore")
             .hidden(false)
             .follow_links(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
             .threads(num_threads)
             .build_parallel();
     }
@@ -173,20 +173,21 @@ fn main() -> io::Result<()> {
     leading_path = leading_path.trim_end_matches('/');
 
     for e in &entries {
-        let path = format!("{}", e.0.path().display());
+        let path = e.0.path();
+        let path_disp = format!("{}", path.display());
         let res;
         if full_path {
             if color {
-                res = print_lscolor_path(&mut stdout, &ls_colors, path.as_ref(), e.0.path().is_dir());
+                res = print_lscolor_path(&mut stdout, &ls_colors, path_disp.as_ref(), path.is_dir());
             } else {
-                res = print_path(&mut stdout, path.as_ref(), e.0.path().is_dir());
+                res = print_path(&mut stdout, path_disp.as_ref(), path.is_dir());
             }
         } else {
-            if path.len() > leading_path.len() {
+            if path_disp.len() > leading_path.len() {
                 if color {
-                    res = print_lscolor_path(&mut stdout, &ls_colors, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+                    res = print_lscolor_path(&mut stdout, &ls_colors, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
                 } else {
-                    res = print_path(&mut stdout, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+                    res = print_path(&mut stdout, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
                 }
             } else {
                 res = Ok(());
