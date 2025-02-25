@@ -11,6 +11,53 @@ use ignore::{WalkBuilder, DirEntry, overrides::OverrideBuilder};
 use std::path::Path;
 use std::fs;
 
+use lscolors::{LsColors, Style};
+
+#[cfg(all(
+    not(feature = "nu-ansi-term"),
+    not(feature = "gnu_legacy"),
+    not(feature = "ansi_term"),
+    not(feature = "crossterm"),
+    not(feature = "owo-colors")
+))]
+compile_error!(
+    "one feature must be enabled: ansi_term, nu-ansi-term, crossterm, gnu_legacy, owo-colors"
+);
+
+fn print_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing_slash: bool) -> io::Result<()> {
+    for (component, style) in ls_colors.style_for_path_components(Path::new(path)) {
+        #[cfg(any(feature = "nu-ansi-term", feature = "gnu_legacy"))]
+        {
+            let ansi_style = style.map(Style::to_nu_ansi_term_style).unwrap_or_default();
+            write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
+        }
+
+        #[cfg(feature = "ansi_term")]
+        {
+            let ansi_style = style.map(Style::to_ansi_term_style).unwrap_or_default();
+            write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
+        }
+
+        #[cfg(feature = "crossterm")]
+        {
+            let ansi_style = style.map(Style::to_crossterm_style).unwrap_or_default();
+            write!(handle, "{}", ansi_style.apply(component.to_string_lossy()))?;
+        }
+        #[cfg(feature = "owo-colors")]
+        {
+            use owo_colors::OwoColorize;
+            let ansi_style = style.map(Style::to_owo_colors_style).unwrap_or_default();
+            write!(handle, "{}", component.to_string_lossy().style(ansi_style))?;
+        }
+    }
+    if trailing_slash {
+        write!(handle, "/")?;
+    }
+    writeln!(handle)?;
+
+    Ok(())
+}
+
 fn is_dir(entry: &DirEntry) -> bool {
     entry
         .file_type()
@@ -88,6 +135,8 @@ fn normalize_path(path: &str) -> std::io::Result<String> {
 }
 
 fn main() -> io::Result<()> {
+    let ls_colors = LsColors::from_env().unwrap_or_default();
+
     let mut stdout = io::stdout();
     let matches = App::new("sortfs")
         .version("1.0")
@@ -132,36 +181,19 @@ fn main() -> io::Result<()> {
 
     for e in &entries {
         let path = format!("{}", e.0.path().display());
+        let res;
         if full_path {
-            if e.0.path().is_dir() {
-                let res = writeln!(&mut stdout, "{}/", &path);
-                match res {
-                    Ok(_) => (),
-                    Err(_e) => { process::exit(1) },
-                }
-            } else {
-                let res = writeln!(&mut stdout, "{}", &path);
-                match res {
-                    Ok(_) => (),
-                    Err(_e) => { process::exit(1) },
-                }
-            }
+            res = print_path(&mut stdout, &ls_colors, path.as_ref(), e.0.path().is_dir());
         } else {
             if path.len() > leading_path.len() {
-                if e.0.path().is_dir() {
-                    let res = writeln!(&mut stdout, "{}/", &path[leading_path.len() + 1..]);
-                    match res {
-                        Ok(_) => (),
-                        Err(_e) => { process::exit(1) },
-                    }
-                } else {
-                    let res = writeln!(&mut stdout, "{}", &path[leading_path.len() + 1..]);
-                    match res {
-                        Ok(_) => (),
-                        Err(_e) => { process::exit(1) },
-                    }
-                }
+                res = print_path(&mut stdout, &ls_colors, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+            } else {
+                res = Ok(());
             }
+        }
+        match res {
+            Ok(_) => (),
+            Err(_e) => { process::exit(1) },
         }
     }
 
