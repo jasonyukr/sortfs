@@ -20,7 +20,16 @@ compile_error!(
     "feature must be enabled: nu-ansi-term"
 );
 
-fn print_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing_slash: bool) -> io::Result<()> {
+fn print_path(handle: &mut dyn Write, path: &str, trailing_slash: bool) -> io::Result<()> {
+    write!(handle, "{}", path)?;
+    if trailing_slash {
+        write!(handle, "/")?;
+    }
+    writeln!(handle)?;
+    Ok(())
+}
+
+fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing_slash: bool) -> io::Result<()> {
     for (component, style) in ls_colors.style_for_path_components(Path::new(path)) {
         #[cfg(any(feature = "nu-ansi-term", feature = "gnu_legacy"))]
         {
@@ -32,7 +41,6 @@ fn print_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing
         write!(handle, "/")?;
     }
     writeln!(handle)?;
-
     Ok(())
 }
 
@@ -135,10 +143,17 @@ fn main() -> io::Result<()> {
                 .long("full-path")
                 .help("Show fullpath")
         )
+        .arg(
+            Arg::with_name("color")
+                .short("c")
+                .long("color")
+                .help("Use ls-colors")
+        )
         .get_matches();
 
     let dirs_only = matches.is_present("dirs-only");
     let full_path = matches.is_present("full-path");
+    let color = matches.is_present("color");
 
     let dir;
     let target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
@@ -161,10 +176,18 @@ fn main() -> io::Result<()> {
         let path = format!("{}", e.0.path().display());
         let res;
         if full_path {
-            res = print_path(&mut stdout, &ls_colors, path.as_ref(), e.0.path().is_dir());
+            if color {
+                res = print_lscolor_path(&mut stdout, &ls_colors, path.as_ref(), e.0.path().is_dir());
+            } else {
+                res = print_path(&mut stdout, path.as_ref(), e.0.path().is_dir());
+            }
         } else {
             if path.len() > leading_path.len() {
-                res = print_path(&mut stdout, &ls_colors, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+                if color {
+                    res = print_lscolor_path(&mut stdout, &ls_colors, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+                } else {
+                    res = print_path(&mut stdout, path[leading_path.len() + 1..].as_ref(), e.0.path().is_dir());
+                }
             } else {
                 res = Ok(());
             }
