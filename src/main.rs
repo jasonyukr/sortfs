@@ -15,13 +15,9 @@ use lscolors::{LsColors, Style};
 
 #[cfg(all(
     not(feature = "nu-ansi-term"),
-    not(feature = "gnu_legacy"),
-    not(feature = "ansi_term"),
-    not(feature = "crossterm"),
-    not(feature = "owo-colors")
 ))]
 compile_error!(
-    "one feature must be enabled: ansi_term, nu-ansi-term, crossterm, gnu_legacy, owo-colors"
+    "feature must be enabled: nu-ansi-term"
 );
 
 fn print_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing_slash: bool) -> io::Result<()> {
@@ -30,24 +26,6 @@ fn print_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing
         {
             let ansi_style = style.map(Style::to_nu_ansi_term_style).unwrap_or_default();
             write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
-        }
-
-        #[cfg(feature = "ansi_term")]
-        {
-            let ansi_style = style.map(Style::to_ansi_term_style).unwrap_or_default();
-            write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
-        }
-
-        #[cfg(feature = "crossterm")]
-        {
-            let ansi_style = style.map(Style::to_crossterm_style).unwrap_or_default();
-            write!(handle, "{}", ansi_style.apply(component.to_string_lossy()))?;
-        }
-        #[cfg(feature = "owo-colors")]
-        {
-            use owo_colors::OwoColorize;
-            let ansi_style = style.map(Style::to_owo_colors_style).unwrap_or_default();
-            write!(handle, "{}", component.to_string_lossy().style(ansi_style))?;
         }
     }
     if trailing_slash {
