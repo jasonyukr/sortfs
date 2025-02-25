@@ -22,7 +22,7 @@ compile_error!(
 
 fn print_path(handle: &mut dyn Write, path: &str, trailing_slash: bool) -> io::Result<()> {
     write!(handle, "{}", path)?;
-    if trailing_slash {
+    if trailing_slash && !path.eq("/") {
         write!(handle, "/")?;
     }
     writeln!(handle)?;
@@ -37,7 +37,7 @@ fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, 
             write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
         }
     }
-    if trailing_slash {
+    if trailing_slash && !path.eq("/") {
         write!(handle, "/")?;
     }
     writeln!(handle)?;
