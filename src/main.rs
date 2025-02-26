@@ -20,16 +20,16 @@ compile_error!(
     "feature must be enabled: nu-ansi-term"
 );
 
-fn print_path(handle: &mut dyn Write, path: &str, trailing_slash: bool) -> io::Result<()> {
+fn print_path(handle: &mut dyn Write, path: &str, is_dir: bool) -> io::Result<()> {
     write!(handle, "{}", path)?;
-    if trailing_slash && !path.eq("/") {
+    if is_dir && !path.eq("/") {
         write!(handle, "/")?;
     }
     writeln!(handle)?;
     Ok(())
 }
 
-fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, trailing_slash: bool) -> io::Result<()> {
+fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, is_dir: bool) -> io::Result<()> {
     for (component, style) in ls_colors.style_for_path_components(Path::new(path)) {
         #[cfg(any(feature = "nu-ansi-term", feature = "gnu_legacy"))]
         {
@@ -37,7 +37,7 @@ fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, 
             write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
         }
     }
-    if trailing_slash && !path.eq("/") {
+    if is_dir && !path.eq("/") {
         write!(handle, "/")?;
     }
     writeln!(handle)?;
