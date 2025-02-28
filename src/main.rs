@@ -226,9 +226,8 @@ fn main() -> io::Result<()> {
                 res = Ok(());
             }
         }
-        match res {
-            Ok(_) => (),
-            Err(_e) => { process::exit(1) },
+        if let Err(_) = res {
+            process::exit(1);
         }
     }
 
