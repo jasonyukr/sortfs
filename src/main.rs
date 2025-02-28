@@ -162,9 +162,8 @@ fn main() -> io::Result<()> {
                 .short("m")
                 .long("max-depth")
                 .takes_value(true)
-                .help("max depth for walk")
+                .help("max depth for directory walk through")
         )
-
         .get_matches();
 
     let dirs_only = matches.is_present("dirs-only");
