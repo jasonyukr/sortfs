@@ -52,9 +52,9 @@ fn is_dir(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
+fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
     // Use reasonable number of threads
-    let num_threads = min(4, num_cpus::get() / 2);
+    let num_threads = min(8, num_cpus::get() / 2);
 
     // Builder for current_dir
     let mut builder = WalkBuilder::new(&current_dir);
@@ -74,6 +74,7 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, Syste
             .hidden(false)
             .follow_links(true)
             .filter_entry(is_dir) // directory only
+            .max_depth(max_depth)
             .threads(num_threads)
             .build_parallel();
     } else {
@@ -82,6 +83,7 @@ fn build_entries(dirs_only: bool, current_dir: &PathBuf) -> Vec<(DirEntry, Syste
             .add_custom_ignore_filename(".fdignore")
             .hidden(false)
             .follow_links(true)
+            .max_depth(max_depth)
             .threads(num_threads)
             .build_parallel();
     }
@@ -155,6 +157,14 @@ fn main() -> io::Result<()> {
                 .long("prefix-target")
                 .help("Put the target-dir as prefix")
         )
+        .arg(
+            Arg::with_name("max-depth")
+                .short("m")
+                .long("max-depth")
+                .takes_value(true)
+                .help("max depth for walk")
+        )
+
         .get_matches();
 
     let dirs_only = matches.is_present("dirs-only");
@@ -168,6 +178,12 @@ fn main() -> io::Result<()> {
     let mut target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
     target_dir = target_dir.trim_end_matches('/');
 
+    let max_depth = matches.value_of("max-depth").unwrap_or("");
+    let max_depth: Option<usize> = match max_depth.parse::<usize>() {
+        Ok(n) => Some(n),
+        Err(_) => None
+    };
+
     let dir;
     if full_path {
         match normalize_path(target_dir) {
@@ -180,7 +196,7 @@ fn main() -> io::Result<()> {
     } else {
         dir = PathBuf::from(target_dir);
     }
-    let entries = build_entries(dirs_only, &dir);
+    let entries = build_entries(dirs_only, max_depth, &dir);
     let mut leading_path = dir.to_str().unwrap();
     leading_path = leading_path.trim_end_matches('/');
 
