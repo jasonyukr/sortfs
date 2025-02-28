@@ -1,2 +1,0 @@
-[build]
-rustflags = ["--cfg", "feature=\"nu-ansi-term\""]
