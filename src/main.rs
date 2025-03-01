@@ -59,10 +59,9 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
     // Builder for current_dir
     let mut builder = WalkBuilder::new(&current_dir);
 
-    // Ignore ".git/*" and ".hg/*" contents
+    // Ignore ".git/" sub-path
     let mut overrides = OverrideBuilder::new(&current_dir);
     overrides.add("!**/.git/*").unwrap();
-    overrides.add("!**/.hg/*").unwrap();
     builder.overrides(overrides.build().unwrap());
 
     // Create walker from builder
