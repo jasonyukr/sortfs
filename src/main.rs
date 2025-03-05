@@ -253,31 +253,34 @@ fn main() -> io::Result<()> {
         }
     }
     let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
+
     let mut leading_path = prefix_dir.to_str().unwrap();
     leading_path = leading_path.trim_end_matches('/');
+    let skip_idx = leading_path.len() + 1;
 
     let mut is_first = true;
     for e in &entries {
         let path = e.0.path();
-        let path_disp;
-        if prefix_target {
-            path_disp = format!("{}/{}", target_dir, path.display());
-        } else {
-            path_disp = format!("{}", path.display());
-        }
         let res;
         if full_path {
+            let path_disp = format!("{}", path.display());
             if color {
                 res = print_lscolor_path(&mut writer, &ls_colors, path_disp.as_ref(), path.is_dir());
             } else {
                 res = print_path(&mut writer, path_disp.as_ref(), path.is_dir());
             }
         } else {
+            let path_disp;
+            if prefix_target {
+                path_disp = format!("{}/{}", target_dir, path.display());
+            } else {
+                path_disp = format!("{}", path.display());
+            }
             if path_disp.len() > leading_path.len() {
                 if color {
-                    res = print_lscolor_path(&mut writer, &ls_colors, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
+                    res = print_lscolor_path(&mut writer, &ls_colors, path_disp[skip_idx..].as_ref(), path.is_dir());
                 } else {
-                    res = print_path(&mut writer, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
+                    res = print_path(&mut writer, path_disp[skip_idx..].as_ref(), path.is_dir());
                 }
             } else {
                 res = Ok(());
