@@ -92,15 +92,12 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
     walker.run(|| {
         let results = Arc::clone(&results);
         Box::new(move |entry| {
-            match entry {
-                Ok(entry) => {
-                    let modified = metadata(entry.path())
-                        .and_then(|meta| meta.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH); // default to UNIX_EPOCH if error
-                    let mut results = results.lock().unwrap();
-                    results.push((entry, modified));
-                }
-                Err(_err) => (),
+            if let Ok(entry) = entry {
+                let modified = metadata(entry.path())
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH); // default to UNIX_EPOCH if error
+                let mut results = results.lock().unwrap();
+                results.push((entry, modified));
             }
             ignore::WalkState::Continue
         })
