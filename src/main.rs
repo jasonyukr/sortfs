@@ -1,5 +1,5 @@
 use clap::{App, Arg};
-use std::io::{self, Write};
+use std::io::{self, Write, BufWriter};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::process;
@@ -160,7 +160,9 @@ fn normalize_path(path: &str) -> std::io::Result<String> {
 fn main() -> io::Result<()> {
     let ls_colors = LsColors::from_env().unwrap_or_default();
 
-    let mut stdout = io::stdout();
+    let stdout = io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+
     let matches = App::new("sortfs")
         .version("1.0")
         .arg(
@@ -254,6 +256,7 @@ fn main() -> io::Result<()> {
     let mut leading_path = prefix_dir.to_str().unwrap();
     leading_path = leading_path.trim_end_matches('/');
 
+    let mut is_first = true;
     for e in &entries {
         let path = e.0.path();
         let path_disp;
@@ -265,16 +268,16 @@ fn main() -> io::Result<()> {
         let res;
         if full_path {
             if color {
-                res = print_lscolor_path(&mut stdout, &ls_colors, path_disp.as_ref(), path.is_dir());
+                res = print_lscolor_path(&mut writer, &ls_colors, path_disp.as_ref(), path.is_dir());
             } else {
-                res = print_path(&mut stdout, path_disp.as_ref(), path.is_dir());
+                res = print_path(&mut writer, path_disp.as_ref(), path.is_dir());
             }
         } else {
             if path_disp.len() > leading_path.len() {
                 if color {
-                    res = print_lscolor_path(&mut stdout, &ls_colors, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
+                    res = print_lscolor_path(&mut writer, &ls_colors, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
                 } else {
-                    res = print_path(&mut stdout, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
+                    res = print_path(&mut writer, path_disp[leading_path.len() + 1..].as_ref(), path.is_dir());
                 }
             } else {
                 res = Ok(());
@@ -283,7 +286,13 @@ fn main() -> io::Result<()> {
         if let Err(_) = res {
             process::exit(1);
         }
+
+        if is_first == true {
+            writer.flush().unwrap();
+            is_first = false;
+        }
     }
 
+    writer.flush().unwrap();
     Ok(())
 }
