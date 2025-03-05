@@ -1,5 +1,4 @@
 use clap::{App, Arg};
-use std::cmp::{min};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -53,8 +52,8 @@ fn is_dir(entry: &DirEntry) -> bool {
 }
 
 fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
-    // Use reasonable number of threads
-    let num_threads = min(8, num_cpus::get() / 2);
+    // Use max threads
+    let num_threads = num_cpus::get();
 
     // Builder for current_dir
     let mut builder = WalkBuilder::new(&current_dir);
