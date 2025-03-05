@@ -51,7 +51,11 @@ fn is_dir(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBuf) -> Vec<(DirEntry, SystemTime)> {
+fn starts_with_word(entry: &ignore::DirEntry, word: &str) -> bool {
+    entry.path().to_str().map_or(false, |path| path.starts_with(word))
+}
+
+fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBuf, leftover: String) -> Vec<(DirEntry, SystemTime)> {
     // Use max threads
     let num_threads = num_cpus::get();
 
@@ -63,27 +67,54 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
     overrides.add("!**/.git/*").unwrap();
     builder.overrides(overrides.build().unwrap());
 
+    let current_dir_path = current_dir.display().to_string();
+    let leftover_mode = leftover.len() > 0;
+
     // Create walker from builder
     let walker;
     if dirs_only {
-        walker = builder
-            .standard_filters(true)
-            .add_custom_ignore_filename(".fdignore")
-            .hidden(false)
-            .follow_links(true)
-            .filter_entry(is_dir) // directory only
-            .max_depth(max_depth)
-            .threads(num_threads)
-            .build_parallel();
+        if leftover_mode {
+            walker = builder
+                .standard_filters(true)
+                .add_custom_ignore_filename(".fdignore")
+                .hidden(false)
+                .follow_links(true)
+                .filter_entry(move |entry| is_dir(entry) && starts_with_word(entry, &leftover)) // dir-only + leftover
+                .max_depth(max_depth)
+                .threads(num_threads)
+                .build_parallel();
+        } else {
+            walker = builder
+                .standard_filters(true)
+                .add_custom_ignore_filename(".fdignore")
+                .hidden(false)
+                .follow_links(true)
+                .filter_entry(move |entry| is_dir(entry)) // dir-only
+                .max_depth(max_depth)
+                .threads(num_threads)
+                .build_parallel();
+        }
     } else {
-        walker = builder
-            .standard_filters(true)
-            .add_custom_ignore_filename(".fdignore")
-            .hidden(false)
-            .follow_links(true)
-            .max_depth(max_depth)
-            .threads(num_threads)
-            .build_parallel();
+        if leftover_mode {
+            walker = builder
+                .standard_filters(true)
+                .add_custom_ignore_filename(".fdignore")
+                .hidden(false)
+                .follow_links(true)
+                .filter_entry(move |entry| starts_with_word(entry, &leftover)) // leftover
+                .max_depth(max_depth)
+                .threads(num_threads)
+                .build_parallel();
+        } else {
+            walker = builder
+                .standard_filters(true)
+                .add_custom_ignore_filename(".fdignore")
+                .hidden(false)
+                .follow_links(true)
+                .max_depth(max_depth)
+                .threads(num_threads)
+                .build_parallel();
+        }
     }
 
     // Run the walker to collect (entry, modified) vector
@@ -102,8 +133,17 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
         })
     });
 
-    // Sort the results by the "modified"
     let mut results = results.lock().unwrap();
+
+    // Remove the first entry (walk target) for the leftover mode
+    if leftover_mode && results.len() > 0 {
+        let (top_entry, _) = results.get(0).unwrap();
+        if current_dir_path.eq(&top_entry.path().display().to_string()) {
+            results.remove(0);
+        }
+    }
+
+    // Sort the results by the "modified"
     results.par_sort_by(|(_a, a_modified), (_b, b_modified)| {
         b_modified.cmp(&a_modified)
     });
@@ -124,9 +164,14 @@ fn main() -> io::Result<()> {
     let matches = App::new("sortfs")
         .version("1.0")
         .arg(
-            Arg::with_name("DIRECTORY")
-                .help("Directory to walk through (defaults to current directory)")
+            Arg::with_name("PREFIX")
+                .help("Target directory to walk through (defaults to current directory)")
                 .index(1),
+        )
+        .arg(
+            Arg::with_name("LEFTOVER")
+                .help("Leftover used to filter the result (defaults to \"\")")
+                .index(2),
         )
         .arg(
             Arg::with_name("dirs-only")
@@ -169,8 +214,10 @@ fn main() -> io::Result<()> {
         prefix_target = false;
     }
 
-    let mut target_dir = matches.value_of("DIRECTORY").unwrap_or(".");
+    let mut target_dir = matches.value_of("PREFIX").unwrap_or(".");
     target_dir = target_dir.trim_end_matches('/');
+
+    let leftover_val = matches.value_of("LEFTOVER").unwrap_or("");
 
     let max_depth = matches.value_of("max-depth").unwrap_or("");
     let max_depth: Option<usize> = match max_depth.parse::<usize>() {
@@ -178,20 +225,33 @@ fn main() -> io::Result<()> {
         Err(_) => None
     };
 
-    let dir;
+    let prefix_dir;
+    let leftover;
     if full_path {
         match normalize_path(target_dir) {
-            Ok(normalized) => dir = PathBuf::from(normalized),
+            Ok(normalized) => {
+                prefix_dir = PathBuf::from(normalized.clone());
+                if leftover_val.len() > 0 {
+                    leftover = format!("{}/{}", normalized, leftover_val).to_string();
+                } else {
+                    leftover = "".to_string();
+                }
+            },
             Err(e) => {
                 eprintln!("Error: {}", e);
                 process::exit(1);
             }
         }
     } else {
-        dir = PathBuf::from(target_dir);
+        prefix_dir = PathBuf::from(target_dir);
+        if leftover_val.len() > 0 {
+            leftover = format!("{}/{}", target_dir, leftover_val).to_string();
+        } else {
+            leftover = "".to_string();
+        }
     }
-    let entries = build_entries(dirs_only, max_depth, &dir);
-    let mut leading_path = dir.to_str().unwrap();
+    let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
+    let mut leading_path = prefix_dir.to_str().unwrap();
     leading_path = leading_path.trim_end_matches('/');
 
     for e in &entries {
