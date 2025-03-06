@@ -71,51 +71,27 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
     let leftover_mode = leftover.len() > 0;
 
     // Create walker from builder
-    let walker;
+    let mut builder = builder
+        .standard_filters(true)
+        .add_custom_ignore_filename(".fdignore")
+        .hidden(false)
+        .follow_links(true)
+        .max_depth(max_depth)
+        .threads(num_threads);
     if dirs_only {
         if leftover_mode {
-            walker = builder
-                .standard_filters(true)
-                .add_custom_ignore_filename(".fdignore")
-                .hidden(false)
-                .follow_links(true)
-                .filter_entry(move |entry| is_dir(entry) && starts_with_word(entry, &leftover)) // dir-only + leftover
-                .max_depth(max_depth)
-                .threads(num_threads)
-                .build_parallel();
+            builder = builder.filter_entry(move |entry| is_dir(entry) && starts_with_word(entry, &leftover));
         } else {
-            walker = builder
-                .standard_filters(true)
-                .add_custom_ignore_filename(".fdignore")
-                .hidden(false)
-                .follow_links(true)
-                .filter_entry(move |entry| is_dir(entry)) // dir-only
-                .max_depth(max_depth)
-                .threads(num_threads)
-                .build_parallel();
+            builder = builder.filter_entry(move |entry| is_dir(entry));
         }
     } else {
         if leftover_mode {
-            walker = builder
-                .standard_filters(true)
-                .add_custom_ignore_filename(".fdignore")
-                .hidden(false)
-                .follow_links(true)
-                .filter_entry(move |entry| starts_with_word(entry, &leftover)) // leftover
-                .max_depth(max_depth)
-                .threads(num_threads)
-                .build_parallel();
+            builder = builder.filter_entry(move |entry| starts_with_word(entry, &leftover));
         } else {
-            walker = builder
-                .standard_filters(true)
-                .add_custom_ignore_filename(".fdignore")
-                .hidden(false)
-                .follow_links(true)
-                .max_depth(max_depth)
-                .threads(num_threads)
-                .build_parallel();
+            // no filter_entry()
         }
     }
+    let walker = builder.build_parallel();
 
     // Run the walker to collect (entry, modified) vector
     let results = Arc::new(Mutex::new(Vec::new()));
