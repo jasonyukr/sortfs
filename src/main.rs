@@ -1,5 +1,5 @@
 use clap::{App, Arg};
-use std::io::{self, Write, BufWriter};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use std::process;
@@ -160,8 +160,7 @@ fn normalize_path(path: &str) -> std::io::Result<String> {
 fn main() -> io::Result<()> {
     let ls_colors = LsColors::from_env().unwrap_or_default();
 
-    let stdout = io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
+    let mut stdout = io::stdout();
 
     let matches = App::new("sortfs")
         .version("1.0")
@@ -244,26 +243,19 @@ fn main() -> io::Result<()> {
     }
     let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
 
-    let mut is_first = true;
     for e in &entries {
         let path = e.0.path();
         let path_disp = format!("{}", path.display());
         let res;
         if color {
-            res = print_lscolor_path(&mut writer, &ls_colors, path_disp.as_ref(), path.is_dir());
+            res = print_lscolor_path(&mut stdout, &ls_colors, path_disp.as_ref(), path.is_dir());
         } else {
-            res = print_path(&mut writer, path_disp.as_ref(), path.is_dir());
+            res = print_path(&mut stdout, path_disp.as_ref(), path.is_dir());
         }
         if let Err(_) = res {
             process::exit(1);
         }
-
-        if is_first == true {
-            writer.flush().unwrap();
-            is_first = false;
-        }
     }
 
-    writer.flush().unwrap();
     Ok(())
 }
