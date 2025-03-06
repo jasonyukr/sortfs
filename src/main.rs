@@ -135,8 +135,8 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
 
     let mut results = results.lock().unwrap();
 
-    // Remove the first entry (walk target) for the leftover mode
-    if leftover_mode && results.len() > 0 {
+    // Remove the first entry (walk target) from the result
+    if results.len() > 0 {
         let (top_entry, _) = results.get(0).unwrap();
         if current_dir_path.eq(&top_entry.path().display().to_string()) {
             results.remove(0);
