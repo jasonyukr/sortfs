@@ -194,12 +194,6 @@ fn main() -> io::Result<()> {
                 .help("Use ls-colors")
         )
         .arg(
-            Arg::with_name("prefix-target")
-                .short("p")
-                .long("prefix-target")
-                .help("Put the target-dir as prefix")
-        )
-        .arg(
             Arg::with_name("max-depth")
                 .short("m")
                 .long("max-depth")
@@ -211,10 +205,6 @@ fn main() -> io::Result<()> {
     let dirs_only = matches.is_present("dirs-only");
     let full_path = matches.is_present("full-path");
     let color = matches.is_present("color");
-    let mut prefix_target = matches.is_present("prefix-target");
-    if full_path {
-        prefix_target = false;
-    }
 
     let mut target_dir = matches.value_of("PREFIX").unwrap_or(".");
     target_dir = target_dir.trim_end_matches('/');
@@ -254,37 +244,15 @@ fn main() -> io::Result<()> {
     }
     let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
 
-    let mut leading_path = prefix_dir.to_str().unwrap();
-    leading_path = leading_path.trim_end_matches('/');
-    let skip_idx = leading_path.len() + 1;
-
     let mut is_first = true;
     for e in &entries {
         let path = e.0.path();
+        let path_disp = format!("{}", path.display());
         let res;
-        if full_path {
-            let path_disp = format!("{}", path.display());
-            if color {
-                res = print_lscolor_path(&mut writer, &ls_colors, path_disp.as_ref(), path.is_dir());
-            } else {
-                res = print_path(&mut writer, path_disp.as_ref(), path.is_dir());
-            }
+        if color {
+            res = print_lscolor_path(&mut writer, &ls_colors, path_disp.as_ref(), path.is_dir());
         } else {
-            let path_disp;
-            if prefix_target {
-                path_disp = format!("{}/{}", target_dir, path.display());
-            } else {
-                path_disp = format!("{}", path.display());
-            }
-            if path_disp.len() > leading_path.len() {
-                if color {
-                    res = print_lscolor_path(&mut writer, &ls_colors, path_disp[skip_idx..].as_ref(), path.is_dir());
-                } else {
-                    res = print_path(&mut writer, path_disp[skip_idx..].as_ref(), path.is_dir());
-                }
-            } else {
-                res = Ok(());
-            }
+            res = print_path(&mut writer, path_disp.as_ref(), path.is_dir());
         }
         if let Err(_) = res {
             process::exit(1);
