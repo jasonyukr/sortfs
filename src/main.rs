@@ -287,3 +287,149 @@ fn main() -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filetime::{set_file_mtime, FileTime};
+    use std::fs::{self, File};
+    use std::io::Write as _;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = File::create(path).unwrap();
+        f.write_all(contents).unwrap();
+    }
+
+    fn set_mtime_secs(path: &Path, secs: i64) {
+        let ft = FileTime::from_unix_time(secs, 0);
+        set_file_mtime(path, ft).unwrap();
+    }
+
+    #[test]
+    fn test_print_path_trailing_slash() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("file.txt");
+        write_file(&file_path, b"hello");
+
+        let mut buf = Vec::new();
+        print_path(&mut buf, dir.path(), true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.ends_with("/\n"), "expected trailing slash for dirs, got {:?}", s);
+
+        let mut buf = Vec::new();
+        print_path(&mut buf, &file_path, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.ends_with('\n') && !s.ends_with("/\n"), "expected no trailing slash for files, got {:?}", s);
+    }
+
+    #[test]
+    fn test_build_entries_sorting_and_tie_break() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        write_file(&a, b"a");
+        write_file(&b, b"b");
+        write_file(&c, b"c");
+
+        // Use fixed mtimes to avoid flakiness.
+        // a and b same mtime, c is newer.
+        let base = 1_700_000_000i64;
+        set_mtime_secs(&a, base);
+        set_mtime_secs(&b, base);
+        set_mtime_secs(&c, base + 10);
+
+        let entries = build_entries(false, None, dir.path(), None);
+        let names: Vec<String> = entries
+            .into_iter()
+            .map(|(p, _is_dir, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        // Newest first
+        assert_eq!(names[0], "c.txt");
+        // Tie-break by path ASC for a and b
+        assert!(names[1] <= names[2], "expected tie-break alphabetical: {:?}",
+                names);
+        assert!(names.contains(&"a.txt".to_string()));
+        assert!(names.contains(&"b.txt".to_string()));
+    }
+
+    #[test]
+    fn test_build_entries_dirs_only() {
+        let dir = tempdir().unwrap();
+        let d1 = dir.path().join("dir1");
+        let f1 = dir.path().join("file1");
+        fs::create_dir_all(&d1).unwrap();
+        write_file(&f1, b"x");
+
+        let entries = build_entries(true, None, dir.path(), None);
+        assert!(entries.iter().all(|(_, is_dir, _)| *is_dir));
+        let names: Vec<_> = entries
+            .iter()
+            .map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"dir1".to_string()));
+        assert!(!names.contains(&"file1".to_string()));
+    }
+
+    #[test]
+    fn test_build_entries_leftover_filter() {
+        let dir = tempdir().unwrap();
+        let a1 = dir.path().join("a1");
+        let a2 = dir.path().join("a2");
+        let b1 = dir.path().join("b1");
+        fs::create_dir_all(&a1).unwrap();
+        fs::create_dir_all(&a2).unwrap();
+        fs::create_dir_all(&b1).unwrap();
+        write_file(&a1.join("f.txt"), b"x");
+        write_file(&a2.join("g.txt"), b"y");
+        write_file(&b1.join("h.txt"), b"z");
+
+        let entries = build_entries(false, None, dir.path(), Some("a".to_string()));
+        let rels: Vec<String> = entries
+            .iter()
+            .map(|(p, _, _)| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        // Should include only under a1/ or a2/, not b1/
+        assert!(rels.iter().all(|r| r.starts_with("a1") || r.starts_with("a2")));
+    }
+
+    #[test]
+    fn test_build_entries_max_depth_1() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        let child = parent.join("child");
+        let grandchild = child.join("grand");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&grandchild).unwrap();
+        write_file(&child.join("f.txt"), b"x");
+        write_file(&grandchild.join("g.txt"), b"y");
+
+        // Depth 1: only direct children of base (i.e., "parent") should appear,
+        // not nested entries.
+        let entries = build_entries(false, Some(1), dir.path(), None);
+        let names: Vec<_> = entries
+            .iter()
+            .map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.contains(&"parent".to_string()));
+        // No nested files/dirs should be present at depth 1
+        assert!(!names.contains(&"child".to_string()));
+        assert!(!names.contains(&"f.txt".to_string()));
+        assert!(!names.contains(&"grand".to_string()));
+        assert!(!names.contains(&"g.txt".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_path_error() {
+        let res = normalize_path("/path/that/does/not/exist/hopefully");
+        assert!(res.is_err());
+    }
+}

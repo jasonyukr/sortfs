@@ -17,3 +17,9 @@ rayon = "1.10"
 ignore = "0.4.23"
 lscolors = "0.20.0"
 nu-ansi-term = { version = "0.50", optional = true }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.10"
+filetime = "0.2"
