@@ -1,48 +1,19 @@
 use clap::{App, Arg};
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::time::SystemTime;
-use std::process;
-use std::sync::{Arc, Mutex};
-use std::fs::metadata;
-use rayon::prelude::*;
-use ignore::{WalkBuilder, DirEntry, overrides::OverrideBuilder};
-use std::path::Path;
-use std::fs;
-
+use ignore::{overrides::OverrideBuilder, DirEntry, WalkBuilder};
 use lscolors::{LsColors, Style};
+use rayon::prelude::*;
+use std::fs;
+use std::fs::metadata;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::mpsc;
+use std::time::SystemTime;
 
-#[cfg(all(
-    not(feature = "nu-ansi-term"),
-))]
-compile_error!(
-    "feature must be enabled: nu-ansi-term"
-);
+#[cfg(all(not(feature = "nu-ansi-term")))]
+compile_error!("feature must be enabled: nu-ansi-term");
 
-fn print_path(handle: &mut dyn Write, path: &str, is_dir: bool) -> io::Result<()> {
-    write!(handle, "{}", path)?;
-    if is_dir && !path.eq("/") {
-        write!(handle, "/")?;
-    }
-    writeln!(handle)?;
-    Ok(())
-}
-
-fn print_lscolor_path(handle: &mut dyn Write, ls_colors: &LsColors, path: &str, is_dir: bool) -> io::Result<()> {
-    for (component, style) in ls_colors.style_for_path_components(Path::new(path)) {
-        #[cfg(any(feature = "nu-ansi-term", feature = "gnu_legacy"))]
-        {
-            let ansi_style = style.map(Style::to_nu_ansi_term_style).unwrap_or_default();
-            write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
-        }
-    }
-    if is_dir && !path.eq("/") {
-        write!(handle, "/")?;
-    }
-    writeln!(handle)?;
-    Ok(())
-}
-
+#[inline]
 fn is_dir(entry: &DirEntry) -> bool {
     entry
         .file_type()
@@ -51,26 +22,55 @@ fn is_dir(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn starts_with_word(entry: &ignore::DirEntry, word: &str) -> bool {
-    entry.path().to_str().map_or(false, |path| path.starts_with(word))
+#[inline]
+fn print_path<W: Write>(handle: &mut W, path: &Path, is_dir: bool) -> io::Result<()> {
+    write!(handle, "{}", path.display())?;
+    if is_dir && path != Path::new("/") {
+        write!(handle, "/")?;
+    }
+    writeln!(handle)?;
+    Ok(())
 }
 
-fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBuf, leftover: String) -> Vec<(DirEntry, SystemTime)> {
-    // Use max threads
+#[inline]
+fn print_lscolor_path<W: Write>(
+    handle: &mut W,
+    ls_colors: &LsColors,
+    path: &Path,
+    is_dir: bool,
+) -> io::Result<()> {
+    for (component, style) in ls_colors.style_for_path_components(path) {
+        #[cfg(any(feature = "nu-ansi-term", feature = "gnu_legacy"))]
+        {
+            let ansi_style = style.map(Style::to_nu_ansi_term_style).unwrap_or_default();
+            write!(handle, "{}", ansi_style.paint(component.to_string_lossy()))?;
+        }
+    }
+    if is_dir && path != Path::new("/") {
+        write!(handle, "/")?;
+    }
+    writeln!(handle)?;
+    Ok(())
+}
+
+fn build_entries(
+    dirs_only: bool,
+    max_depth: Option<usize>,
+    current_dir: &Path,
+    leftover: Option<String>,
+) -> Vec<(PathBuf, bool, SystemTime)> {
+    // Use all logical cores for traversal
     let num_threads = num_cpus::get();
 
     // Builder for current_dir
-    let mut builder = WalkBuilder::new(&current_dir);
+    let mut builder = WalkBuilder::new(current_dir);
 
     // Ignore ".git/" sub-path
-    let mut overrides = OverrideBuilder::new(&current_dir);
+    let mut overrides = OverrideBuilder::new(current_dir);
     overrides.add("!**/.git/*").unwrap();
     builder.overrides(overrides.build().unwrap());
 
-    let current_dir_path = current_dir.display().to_string();
-    let leftover_mode = leftover.len() > 0;
-
-    // Create walker from builder
+    // Configure walker
     let mut builder = builder
         .standard_filters(true)
         .add_custom_ignore_filename(".fdignore")
@@ -78,65 +78,116 @@ fn build_entries(dirs_only: bool, max_depth: Option<usize>, current_dir: &PathBu
         .follow_links(true)
         .max_depth(max_depth)
         .threads(num_threads);
-    if dirs_only {
-        if leftover_mode {
-            builder = builder.filter_entry(move |entry| is_dir(entry) && starts_with_word(entry, &leftover));
+
+    // Apply filtering as early as possible to reduce I/O.
+    // When a leftover string is provided, restrict traversal by precomputing
+    // the matching top-level children (files/dirs) once, then only traverse
+    // entries that are under those paths. This minimizes per-entry work.
+    let base = current_dir.to_path_buf();
+    if let Some(filter) = leftover {
+        // Pre-scan direct children of base to compute allowed roots.
+        let allowed_roots: Vec<PathBuf> = match fs::read_dir(&base) {
+            Ok(read_dir) => read_dir
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    match name.to_str() {
+                        Some(s) if s.starts_with(&filter) => Some(e.path()),
+                        _ => None,
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        if dirs_only {
+            let allowed = allowed_roots.clone();
+            builder = builder.filter_entry(move |entry| {
+                let p = entry.path();
+                if p == base {
+                    return true;
+                }
+                if !is_dir(entry) {
+                    // Don't include files when dirs-only is set.
+                    return false;
+                }
+                // Descend only into directories under allowed roots.
+                allowed.iter().any(|root| p.starts_with(root))
+            });
         } else {
-            builder = builder.filter_entry(move |entry| is_dir(entry));
+            let allowed = allowed_roots.clone();
+            builder = builder.filter_entry(move |entry| {
+                let p = entry.path();
+                if p == base {
+                    return true;
+                }
+                // Keep entries that are either the matching top-level files, or under matching directories.
+                allowed.iter().any(|root| p.starts_with(root))
+            });
         }
-    } else {
-        if leftover_mode {
-            builder = builder.filter_entry(move |entry| starts_with_word(entry, &leftover));
-        } else {
-            // no filter_entry()
-        }
+    } else if dirs_only {
+        // Only show directories
+        builder = builder.filter_entry(move |entry| is_dir(entry));
     }
+
     let walker = builder.build_parallel();
 
-    // Run the walker to collect (entry, modified) vector
-    let results = Arc::new(Mutex::new(Vec::new()));
+    // Collect results without a global mutex; use channel to reduce contention
+    let (tx, rx) = mpsc::channel::<(PathBuf, bool, SystemTime)>();
+
     walker.run(|| {
-        let results = Arc::clone(&results);
+        let tx = tx.clone();
         Box::new(move |entry| {
             if let Ok(entry) = entry {
-                let modified = metadata(entry.path())
+                let path = entry.path().to_path_buf();
+
+                // Determine dir flag without extra syscalls where possible
+                let is_dir_flag = entry
+                    .file_type()
+                    .as_ref()
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or_else(|| path.is_dir());
+
+                // Fetch mtime; default to UNIX_EPOCH on error
+                let modified = metadata(&path)
                     .and_then(|meta| meta.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH); // default to UNIX_EPOCH if error
-                let mut results = results.lock().unwrap();
-                results.push((entry, modified));
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                // Ignore send errors if receiver is gone
+                if tx.send((path, is_dir_flag, modified)).is_err() {
+                    return ignore::WalkState::Quit;
+                }
             }
             ignore::WalkState::Continue
         })
     });
+    drop(tx);
 
-    let mut results = results.lock().unwrap();
+    // Drain channel
+    let mut results: Vec<(PathBuf, bool, SystemTime)> = rx.into_iter().collect();
 
-    // Remove the first entry (walk target) from the result
-    if results.len() > 0 {
-        let (top_entry, _) = results.get(0).unwrap();
-        if current_dir_path.eq(&top_entry.path().display().to_string()) {
-            results.remove(0);
-        }
-    }
+    // Remove the walk target itself if present
+    results.retain(|(path, _, _)| path != current_dir);
 
-    // Sort the results by the "modified"
-    results.par_sort_by(|(_a, a_modified), (_b, b_modified)| {
-        b_modified.cmp(&a_modified)
+    // Sort by mtime DESC; tie-break by path ASC for deterministic ordering across runs
+    results.par_sort_unstable_by(|(pa, _, ma), (pb, _, mb)| {
+        mb.cmp(ma).then_with(|| pa.cmp(pb))
     });
 
-    results.to_vec()
+    results
 }
 
-fn normalize_path(path: &str) -> std::io::Result<String> {
+fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let path = Path::new(path);
-    let canonical_path = fs::canonicalize(path)?;
-    Ok(canonical_path.to_string_lossy().into_owned())
+    fs::canonicalize(path)
 }
 
 fn main() -> io::Result<()> {
     let ls_colors = LsColors::from_env().unwrap_or_default();
 
-    let mut stdout = io::stdout();
+    // Buffered stdout to minimize syscalls during printing
+    let stdout = io::stdout();
+    let mut out = BufWriter::with_capacity(64 * 1024, stdout.lock());
 
     let matches = App::new("sortfs")
         .version("1.0")
@@ -154,26 +205,26 @@ fn main() -> io::Result<()> {
             Arg::with_name("dirs-only")
                 .short("d")
                 .long("dirs-only")
-                .help("Show directories only")
+                .help("Show directories only"),
         )
         .arg(
             Arg::with_name("full-path")
                 .short("f")
                 .long("full-path")
-                .help("Show fullpath")
+                .help("Show fullpath"),
         )
         .arg(
             Arg::with_name("color")
                 .short("c")
                 .long("color")
-                .help("Use ls-colors")
+                .help("Use ls-colors"),
         )
         .arg(
             Arg::with_name("max-depth")
                 .short("m")
                 .long("max-depth")
                 .takes_value(true)
-                .help("max depth for directory walk through")
+                .help("max depth for directory walk through"),
         )
         .get_matches();
 
@@ -189,21 +240,21 @@ fn main() -> io::Result<()> {
     let max_depth = matches.value_of("max-depth").unwrap_or("");
     let max_depth: Option<usize> = match max_depth.parse::<usize>() {
         Ok(n) => Some(n),
-        Err(_) => None
+        Err(_) => None,
     };
 
-    let prefix_dir;
-    let leftover;
+    let prefix_dir: PathBuf;
+    let leftover: Option<String>;
     if full_path {
         match normalize_path(target_dir) {
             Ok(normalized) => {
-                prefix_dir = PathBuf::from(normalized.clone());
-                if leftover_val.len() > 0 {
-                    leftover = format!("{}/{}", normalized, leftover_val).to_string();
+                prefix_dir = normalized.clone();
+                if !leftover_val.is_empty() {
+                    leftover = Some(leftover_val.to_string());
                 } else {
-                    leftover = "".to_string();
+                    leftover = None;
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("Error: {}", e);
                 process::exit(1);
@@ -211,27 +262,28 @@ fn main() -> io::Result<()> {
         }
     } else {
         prefix_dir = PathBuf::from(target_dir);
-        if leftover_val.len() > 0 {
-            leftover = format!("{}/{}", target_dir, leftover_val).to_string();
+        if !leftover_val.is_empty() {
+            leftover = Some(leftover_val.to_string());
         } else {
-            leftover = "".to_string();
+            leftover = None;
         }
     }
+
     let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
 
-    for e in &entries {
-        let path = e.0.path();
-        let path_disp = format!("{}", path.display());
-        let res;
-        if color {
-            res = print_lscolor_path(&mut stdout, &ls_colors, path_disp.as_ref(), path.is_dir());
+    for (path, is_dir, _modified) in &entries {
+        let res = if color {
+            print_lscolor_path(&mut out, &ls_colors, path, *is_dir)
         } else {
-            res = print_path(&mut stdout, path_disp.as_ref(), path.is_dir());
-        }
-        if let Err(_) = res {
+            print_path(&mut out, path, *is_dir)
+        };
+        if res.is_err() {
             process::exit(1);
         }
     }
+
+    // Ensure all output is flushed
+    out.flush()?;
 
     Ok(())
 }
