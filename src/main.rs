@@ -266,6 +266,7 @@ fn build_entries(
     }
 
     let walker = builder.build_parallel();
+    let walk_root = current_dir.to_path_buf();
 
     // Collect results without a global mutex; send chunks to reduce channel overhead.
     let (tx, rx) = mpsc::channel::<Vec<Entry>>();
@@ -322,9 +323,14 @@ fn build_entries(
 
     walker.run(|| {
         let mut sender = EntryChunkSender::new(tx.clone());
+        let walk_root = walk_root.clone();
         Box::new(move |entry| {
             if let Ok(entry) = entry {
-                let path = entry.path().to_path_buf();
+                let entry_path = entry.path();
+                if entry_path == walk_root {
+                    return ignore::WalkState::Continue;
+                }
+                let path = entry_path.to_path_buf();
 
                 // Determine dir flag without extra syscalls where possible
                 let is_dir_flag = entry
@@ -354,9 +360,6 @@ fn build_entries(
     for chunk in rx {
         results.extend(chunk);
     }
-
-    // Remove the walk target itself if present
-    results.retain(|(_, path, _)| path != current_dir);
 
     // Sort by mtime DESC; dense same-mtime buckets use stable path hashes, otherwise tuple order.
     sort_entries(&mut results);
