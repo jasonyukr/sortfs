@@ -13,6 +13,8 @@ use std::time::SystemTime;
 #[cfg(all(not(feature = "nu-ansi-term")))]
 compile_error!("feature must be enabled: nu-ansi-term");
 
+const PAR_SORT_THRESHOLD: usize = 4096;
+
 #[inline]
 fn is_dir(entry: &DirEntry) -> bool {
     entry
@@ -51,6 +53,22 @@ fn print_lscolor_path<W: Write>(
     }
     writeln!(handle)?;
     Ok(())
+}
+
+#[inline]
+fn compare_entries_by_modified_desc_path_asc(
+    (pa, _, ma): &(PathBuf, bool, SystemTime),
+    (pb, _, mb): &(PathBuf, bool, SystemTime),
+) -> std::cmp::Ordering {
+    mb.cmp(ma).then_with(|| pa.cmp(pb))
+}
+
+fn sort_entries(results: &mut [(PathBuf, bool, SystemTime)]) {
+    if results.len() < PAR_SORT_THRESHOLD {
+        results.sort_unstable_by(compare_entries_by_modified_desc_path_asc);
+    } else {
+        results.par_sort_unstable_by(compare_entries_by_modified_desc_path_asc);
+    }
 }
 
 #[inline]
@@ -157,9 +175,7 @@ fn build_entries(
     results.retain(|(path, _, _)| path != current_dir);
 
     // Sort by mtime DESC; tie-break by path ASC for deterministic ordering across runs
-    results.par_sort_unstable_by(|(pa, _, ma), (pb, _, mb)| {
-        mb.cmp(ma).then_with(|| pa.cmp(pb))
-    });
+    sort_entries(&mut results);
 
     results
 }
