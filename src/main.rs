@@ -14,8 +14,6 @@ use std::time::{Duration, SystemTime};
 compile_error!("feature must be enabled: nu-ansi-term");
 
 const PAR_SORT_THRESHOLD: usize = 4096;
-const DUPLICATE_MTIME_SAMPLE_SIZE: usize = 64;
-const DUPLICATE_MTIME_SAMPLE_DIVISOR: usize = 4;
 const WALKER_CHUNK_CAPACITY: usize = 256;
 
 type Entry = (i128, PathBuf, bool);
@@ -82,122 +80,11 @@ fn modified_sort_key(time: SystemTime) -> i128 {
     }
 }
 
-#[inline]
-fn stable_bytes_hash(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    bytes
-        .iter()
-        .fold(FNV_OFFSET_BASIS, |hash, byte| {
-            (hash ^ *byte as u64).wrapping_mul(FNV_PRIME)
-        })
-}
-
-#[inline]
-#[cfg(unix)]
-fn stable_path_hash(path: &Path) -> u64 {
-    use std::os::unix::ffi::OsStrExt;
-
-    stable_bytes_hash(path.as_os_str().as_bytes())
-}
-
-#[inline]
-#[cfg(not(unix))]
-fn stable_path_hash(path: &Path) -> u64 {
-    stable_bytes_hash(path.to_string_lossy().as_bytes())
-}
-
 fn sort_entries(results: &mut [Entry]) {
-    if has_dense_duplicate_mtimes(results) {
-        sort_entries_cached_hash(results);
-    } else {
-        // Rare same-mtime ties keep tuple path ordering to avoid normal-case hash/comparator overhead.
-        sort_entries_tuple(results);
-    }
-}
-
-fn has_dense_duplicate_mtimes(results: &[Entry]) -> bool {
-    let sample_len = results.len().min(DUPLICATE_MTIME_SAMPLE_SIZE);
-    if sample_len < DUPLICATE_MTIME_SAMPLE_SIZE {
-        return false;
-    }
-
-    let last = results.len() - 1;
-    let mut values = [0i128; DUPLICATE_MTIME_SAMPLE_SIZE];
-    let mut counts = [0usize; DUPLICATE_MTIME_SAMPLE_SIZE];
-    let mut unique = 0;
-    let mut duplicates = 0;
-
-    for i in 0..sample_len {
-        let modified = results[i * last / (sample_len - 1)].0;
-        let mut found = None;
-        for j in 0..unique {
-            if values[j] == modified {
-                found = Some(j);
-                break;
-            }
-        }
-
-        if let Some(j) = found {
-            counts[j] += 1;
-            duplicates += 1;
-        } else {
-            values[unique] = modified;
-            counts[unique] = 1;
-            unique += 1;
-        }
-    }
-
-    duplicates >= (sample_len / DUPLICATE_MTIME_SAMPLE_DIVISOR).max(1)
-}
-
-fn sort_entries_tuple(results: &mut [Entry]) {
     if results.len() < PAR_SORT_THRESHOLD {
         results.sort_unstable();
     } else {
         results.par_sort_unstable();
-    }
-}
-
-fn sort_entries_cached_hash(results: &mut [Entry]) {
-    if results.len() < PAR_SORT_THRESHOLD {
-        results.sort_unstable_by_key(|(modified, _, _)| *modified);
-    } else {
-        results.par_sort_unstable_by_key(|(modified, _, _)| *modified);
-    }
-
-    let mut start = 0;
-    while start < results.len() {
-        let modified = results[start].0;
-        let mut end = start + 1;
-        while end < results.len() && results[end].0 == modified {
-            end += 1;
-        }
-        if end - start > 1 {
-            sort_same_mtime_entries(&mut results[start..end]);
-        }
-        start = end;
-    }
-}
-
-fn sort_same_mtime_entries(entries: &mut [Entry]) {
-    let mut keyed: Vec<_> = entries
-        .iter_mut()
-        .map(|entry| {
-            let path_hash = stable_path_hash(&entry.1);
-            (path_hash, std::mem::take(entry))
-        })
-        .collect();
-
-    keyed.sort_unstable_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.1.cmp(&b.1.1))
-            .then_with(|| a.1.2.cmp(&b.1.2))
-    });
-
-    for (entry, (_, keyed_entry)) in entries.iter_mut().zip(keyed) {
-        *entry = keyed_entry;
     }
 }
 
@@ -361,7 +248,7 @@ fn build_entries(
         results.extend(chunk);
     }
 
-    // Sort by mtime DESC; dense same-mtime buckets use stable path hashes, otherwise tuple order.
+    // Sort by mtime DESC, then path ASC via tuple ordering.
     sort_entries(&mut results);
 
     results
@@ -580,48 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stable_path_hash_fixed_values() {
-        assert_eq!(stable_path_hash(Path::new("a.txt")), 9_139_354_734_180_416_858);
-        assert_eq!(stable_path_hash(Path::new("b.txt")), 133_413_252_347_079_971);
-        assert_eq!(stable_path_hash(Path::new("c.txt")), 313_870_553_047_546_100);
-    }
-
-    #[test]
-    fn test_dense_duplicate_mtime_sample_gate() {
-        let unique: Vec<Entry> = (0..DUPLICATE_MTIME_SAMPLE_SIZE)
-            .map(|i| (i as i128, PathBuf::from(format!("{}.txt", i)), false))
-            .collect();
-        let dense: Vec<Entry> = (0..DUPLICATE_MTIME_SAMPLE_SIZE)
-            .map(|i| (1, PathBuf::from(format!("{}.txt", i)), false))
-            .collect();
-
-        assert!(!has_dense_duplicate_mtimes(&unique));
-        assert!(has_dense_duplicate_mtimes(&dense));
-    }
-
-    #[test]
-    fn test_sort_entries_dense_duplicates_use_hash_order() {
-        let mut entries: Vec<Entry> = vec![
-            (1, PathBuf::from("a.txt"), false),
-            (1, PathBuf::from("c.txt"), false),
-            (1, PathBuf::from("b.txt"), false),
-        ];
-        entries.extend((0..61).map(|i| (1, PathBuf::from(format!("extra-{}.txt", i)), false)));
-
-        sort_entries(&mut entries);
-
-        let names: Vec<_> = entries
-            .iter()
-            .map(|(_, path, _is_dir)| path.to_string_lossy().into_owned())
-            .collect();
-        let b = names.iter().position(|name| name == "b.txt").unwrap();
-        let c = names.iter().position(|name| name == "c.txt").unwrap();
-        let a = names.iter().position(|name| name == "a.txt").unwrap();
-        assert!(b < c && c < a, "names: {:?}", names);
-    }
-
-    #[test]
-    fn test_sort_entries_non_dense_duplicates_use_tuple_order() {
+    fn test_sort_entries_uses_tuple_order() {
         let mut entries: Vec<Entry> = vec![
             (1, PathBuf::from("b.txt"), false),
             (6, PathBuf::from("f.txt"), false),
@@ -655,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_entries_tuple_fallback_orders_bool() {
+    fn test_sort_entries_tuple_order_orders_bool() {
         let mut entries: Vec<Entry> = vec![
             (1, PathBuf::from("a.txt"), true),
             (1, PathBuf::from("a.txt"), false),
