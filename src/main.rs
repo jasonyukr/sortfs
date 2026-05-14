@@ -53,6 +53,25 @@ fn print_lscolor_path<W: Write>(
     Ok(())
 }
 
+#[inline]
+fn is_under_leftover_root(base: &Path, path: &Path, filter: &str) -> bool {
+    if path == base {
+        return true;
+    }
+
+    let relative = match path.strip_prefix(base) {
+        Ok(relative) => relative,
+        Err(_) => return false,
+    };
+
+    relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .map(|name| name.starts_with(filter))
+        .unwrap_or(false)
+}
+
 fn build_entries(
     dirs_only: bool,
     max_depth: Option<usize>,
@@ -80,49 +99,17 @@ fn build_entries(
         .threads(num_threads);
 
     // Apply filtering as early as possible to reduce I/O.
-    // When a leftover string is provided, restrict traversal by precomputing
-    // the matching top-level children (files/dirs) once, then only traverse
-    // entries that are under those paths. This minimizes per-entry work.
     let base = current_dir.to_path_buf();
     if let Some(filter) = leftover {
-        // Pre-scan direct children of base to compute allowed roots.
-        let allowed_roots: Vec<PathBuf> = match fs::read_dir(&base) {
-            Ok(read_dir) => read_dir
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name();
-                    match name.to_str() {
-                        Some(s) if s.starts_with(&filter) => Some(e.path()),
-                        _ => None,
-                    }
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-
         if dirs_only {
-            let allowed = allowed_roots.clone();
             builder = builder.filter_entry(move |entry| {
                 let p = entry.path();
-                if p == base {
-                    return true;
-                }
-                if !is_dir(entry) {
-                    // Don't include files when dirs-only is set.
-                    return false;
-                }
-                // Descend only into directories under allowed roots.
-                allowed.iter().any(|root| p.starts_with(root))
+                is_under_leftover_root(&base, p, &filter) && (p == base || is_dir(entry))
             });
         } else {
-            let allowed = allowed_roots.clone();
             builder = builder.filter_entry(move |entry| {
                 let p = entry.path();
-                if p == base {
-                    return true;
-                }
-                // Keep entries that are either the matching top-level files, or under matching directories.
-                allowed.iter().any(|root| p.starts_with(root))
+                is_under_leftover_root(&base, p, &filter)
             });
         }
     } else if dirs_only {

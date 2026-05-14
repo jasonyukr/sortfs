@@ -1,4 +1,5 @@
 use assert_cmd::prelude::*;
+use filetime::{set_file_mtime, FileTime};
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,11 @@ fn write_file(path: &Path, contents: &[u8]) {
     }
     let mut f = File::create(path).unwrap();
     f.write_all(contents).unwrap();
+}
+
+fn set_mtime_secs(path: &Path, secs: i64) {
+    let ft = FileTime::from_unix_time(secs, 0);
+    set_file_mtime(path, ft).unwrap();
 }
 
 fn run_and_stdout(args: &[&str], current_dir: &Path) -> String {
@@ -34,6 +40,35 @@ fn run_and_stdout(args: &[&str], current_dir: &Path) -> String {
 
 fn lines(stdout: &str) -> Vec<String> {
     stdout.lines().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn cli_repeated_runs_keep_path_tie_break_order() {
+    let td = tempdir().unwrap();
+    let base = td.path();
+    let a2 = base.join("a2.txt");
+    let a1 = base.join("a1.txt");
+    let b1 = base.join("b1.txt");
+    write_file(&a2, b"2");
+    write_file(&a1, b"1");
+    write_file(&b1, b"b");
+
+    let mtime = 1_700_000_000i64;
+    set_mtime_secs(&a2, mtime);
+    set_mtime_secs(&a1, mtime);
+    set_mtime_secs(&b1, mtime);
+
+    let expected = format!(
+        "{}\n{}\n",
+        a1.canonicalize().unwrap().display(),
+        a2.canonicalize().unwrap().display()
+    );
+    let first = run_and_stdout(&["-f", ".", "a"], base);
+    assert_eq!(first, expected);
+
+    for _ in 0..5 {
+        assert_eq!(run_and_stdout(&["-f", ".", "a"], base), first);
+    }
 }
 
 #[test]
