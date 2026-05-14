@@ -16,6 +16,7 @@ compile_error!("feature must be enabled: nu-ansi-term");
 const PAR_SORT_THRESHOLD: usize = 4096;
 const DUPLICATE_MTIME_SAMPLE_SIZE: usize = 64;
 const DUPLICATE_MTIME_SAMPLE_DIVISOR: usize = 4;
+const WALKER_CHUNK_CAPACITY: usize = 256;
 
 type Entry = (i128, PathBuf, bool);
 
@@ -30,11 +31,20 @@ fn is_dir(entry: &DirEntry) -> bool {
 
 #[inline]
 fn print_path<W: Write>(handle: &mut W, path: &Path, is_dir: bool) -> io::Result<()> {
-    write!(handle, "{}", path.display())?;
-    if is_dir && path != Path::new("/") {
-        write!(handle, "/")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        handle.write_all(path.as_os_str().as_bytes())?;
     }
-    writeln!(handle)?;
+    #[cfg(not(unix))]
+    {
+        write!(handle, "{}", path.display())?;
+    }
+    if is_dir && path != Path::new("/") {
+        handle.write_all(b"/")?;
+    }
+    handle.write_all(b"\n")?;
     Ok(())
 }
 
@@ -257,11 +267,61 @@ fn build_entries(
 
     let walker = builder.build_parallel();
 
-    // Collect results without a global mutex; use channel to reduce contention
-    let (tx, rx) = mpsc::channel::<Entry>();
+    // Collect results without a global mutex; send chunks to reduce channel overhead.
+    let (tx, rx) = mpsc::channel::<Vec<Entry>>();
+
+    struct EntryChunkSender {
+        tx: mpsc::Sender<Vec<Entry>>,
+        entries: Vec<Entry>,
+        closed: bool,
+    }
+
+    impl EntryChunkSender {
+        fn new(tx: mpsc::Sender<Vec<Entry>>) -> Self {
+            Self {
+                tx,
+                entries: Vec::with_capacity(WALKER_CHUNK_CAPACITY),
+                closed: false,
+            }
+        }
+
+        fn push(&mut self, entry: Entry) -> bool {
+            self.entries.push(entry);
+            if self.entries.len() == WALKER_CHUNK_CAPACITY {
+                self.flush()
+            } else {
+                true
+            }
+        }
+
+        fn flush(&mut self) -> bool {
+            if self.entries.is_empty() {
+                return true;
+            }
+
+            let entries = std::mem::replace(
+                &mut self.entries,
+                Vec::with_capacity(WALKER_CHUNK_CAPACITY),
+            );
+            if self.tx.send(entries).is_err() {
+                self.closed = true;
+                false
+            } else {
+                true
+            }
+        }
+    }
+
+    impl Drop for EntryChunkSender {
+        fn drop(&mut self) {
+            if !self.closed {
+                self.flush();
+            }
+        }
+    }
 
     walker.run(|| {
-        let tx = tx.clone();
+        let mut sender = EntryChunkSender::new(tx.clone());
         Box::new(move |entry| {
             if let Ok(entry) = entry {
                 let path = entry.path().to_path_buf();
@@ -280,7 +340,7 @@ fn build_entries(
                     .unwrap_or(0);
 
                 // Ignore send errors if receiver is gone
-                if tx.send((modified, path, is_dir_flag)).is_err() {
+                if !sender.push((modified, path, is_dir_flag)) {
                     return ignore::WalkState::Quit;
                 }
             }
@@ -290,7 +350,10 @@ fn build_entries(
     drop(tx);
 
     // Drain channel
-    let mut results: Vec<Entry> = rx.into_iter().collect();
+    let mut results: Vec<Entry> = Vec::new();
+    for chunk in rx {
+        results.extend(chunk);
+    }
 
     // Remove the walk target itself if present
     results.retain(|(_, path, _)| path != current_dir);
@@ -471,6 +534,20 @@ mod tests {
         print_path(&mut buf, &file_path, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.ends_with('\n') && !s.ends_with("/\n"), "expected no trailing slash for files, got {:?}", s);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_print_path_writes_raw_unix_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(vec![b'a', 0xff, b'b']));
+        let mut buf = Vec::new();
+
+        print_path(&mut buf, &path, false).unwrap();
+
+        assert_eq!(buf, vec![b'a', 0xff, b'b', b'\n']);
     }
 
     #[test]
