@@ -8,7 +8,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[cfg(all(not(feature = "nu-ansi-term")))]
 compile_error!("feature must be enabled: nu-ansi-term");
@@ -56,14 +56,27 @@ fn print_lscolor_path<W: Write>(
 }
 
 #[inline]
-fn compare_entries_by_modified_desc_path_asc(
-    (pa, _, ma): &(PathBuf, bool, SystemTime),
-    (pb, _, mb): &(PathBuf, bool, SystemTime),
-) -> std::cmp::Ordering {
-    mb.cmp(ma).then_with(|| pa.cmp(pb))
+fn duration_nanos(duration: Duration) -> i128 {
+    duration.as_secs() as i128 * 1_000_000_000 + duration.subsec_nanos() as i128
 }
 
-fn sort_entries(results: &mut [(PathBuf, bool, SystemTime)]) {
+#[inline]
+fn modified_sort_key(time: SystemTime) -> i128 {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => -duration_nanos(duration),
+        Err(err) => duration_nanos(err.duration()),
+    }
+}
+
+#[inline]
+fn compare_entries_by_modified_desc_path_asc(
+    (pa, _, ma): &(PathBuf, bool, i128),
+    (pb, _, mb): &(PathBuf, bool, i128),
+) -> std::cmp::Ordering {
+    ma.cmp(mb).then_with(|| pa.cmp(pb))
+}
+
+fn sort_entries(results: &mut [(PathBuf, bool, i128)]) {
     if results.len() < PAR_SORT_THRESHOLD {
         results.sort_unstable_by(compare_entries_by_modified_desc_path_asc);
     } else {
@@ -95,7 +108,7 @@ fn build_entries(
     max_depth: Option<usize>,
     current_dir: &Path,
     leftover: Option<String>,
-) -> Vec<(PathBuf, bool, SystemTime)> {
+) -> Vec<(PathBuf, bool, i128)> {
     // Use all logical cores for traversal
     let num_threads = num_cpus::get();
 
@@ -138,7 +151,7 @@ fn build_entries(
     let walker = builder.build_parallel();
 
     // Collect results without a global mutex; use channel to reduce contention
-    let (tx, rx) = mpsc::channel::<(PathBuf, bool, SystemTime)>();
+    let (tx, rx) = mpsc::channel::<(PathBuf, bool, i128)>();
 
     walker.run(|| {
         let tx = tx.clone();
@@ -153,10 +166,11 @@ fn build_entries(
                     .map(|ft| ft.is_dir())
                     .unwrap_or_else(|| path.is_dir());
 
-                // Fetch mtime; default to UNIX_EPOCH on error
+                // Fetch mtime key; default to UNIX_EPOCH key on error
                 let modified = metadata(&path)
                     .and_then(|meta| meta.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                    .map(modified_sort_key)
+                    .unwrap_or(0);
 
                 // Ignore send errors if receiver is gone
                 if tx.send((path, is_dir_flag, modified)).is_err() {
@@ -169,7 +183,7 @@ fn build_entries(
     drop(tx);
 
     // Drain channel
-    let mut results: Vec<(PathBuf, bool, SystemTime)> = rx.into_iter().collect();
+    let mut results: Vec<(PathBuf, bool, i128)> = rx.into_iter().collect();
 
     // Remove the walk target itself if present
     results.retain(|(path, _, _)| path != current_dir);
@@ -311,6 +325,28 @@ mod tests {
     fn set_mtime_secs(path: &Path, secs: i64) {
         let ft = FileTime::from_unix_time(secs, 0);
         set_file_mtime(path, ft).unwrap();
+    }
+
+    #[test]
+    fn test_modified_sort_key_pre_post_epoch_ordering() {
+        let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        let epoch = SystemTime::UNIX_EPOCH;
+        let after = SystemTime::UNIX_EPOCH + Duration::from_nanos(1);
+
+        let before_key = modified_sort_key(before);
+        let epoch_key = modified_sort_key(epoch);
+        let after_key = modified_sort_key(after);
+
+        assert_eq!(before_key, 1_000_000_000);
+        assert_eq!(epoch_key, 0);
+        assert_eq!(after_key, -1);
+
+        let mut keyed_times = [(before_key, before), (epoch_key, epoch), (after_key, after)];
+        keyed_times.sort_by_key(|(key, _)| *key);
+
+        assert_eq!(keyed_times[0].1, after);
+        assert_eq!(keyed_times[1].1, epoch);
+        assert_eq!(keyed_times[2].1, before);
     }
 
     #[test]
