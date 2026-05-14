@@ -15,6 +15,8 @@ compile_error!("feature must be enabled: nu-ansi-term");
 
 const PAR_SORT_THRESHOLD: usize = 4096;
 
+type Entry = (i128, PathBuf, bool);
+
 #[inline]
 fn is_dir(entry: &DirEntry) -> bool {
     entry
@@ -68,19 +70,11 @@ fn modified_sort_key(time: SystemTime) -> i128 {
     }
 }
 
-#[inline]
-fn compare_entries_by_modified_desc_path_asc(
-    (pa, _, ma): &(PathBuf, bool, i128),
-    (pb, _, mb): &(PathBuf, bool, i128),
-) -> std::cmp::Ordering {
-    ma.cmp(mb).then_with(|| pa.cmp(pb))
-}
-
-fn sort_entries(results: &mut [(PathBuf, bool, i128)]) {
+fn sort_entries(results: &mut [Entry]) {
     if results.len() < PAR_SORT_THRESHOLD {
-        results.sort_unstable_by(compare_entries_by_modified_desc_path_asc);
+        results.sort_unstable();
     } else {
-        results.par_sort_unstable_by(compare_entries_by_modified_desc_path_asc);
+        results.par_sort_unstable();
     }
 }
 
@@ -108,7 +102,7 @@ fn build_entries(
     max_depth: Option<usize>,
     current_dir: &Path,
     leftover: Option<String>,
-) -> Vec<(PathBuf, bool, i128)> {
+) -> Vec<Entry> {
     // Use all logical cores for traversal
     let num_threads = num_cpus::get();
 
@@ -151,7 +145,7 @@ fn build_entries(
     let walker = builder.build_parallel();
 
     // Collect results without a global mutex; use channel to reduce contention
-    let (tx, rx) = mpsc::channel::<(PathBuf, bool, i128)>();
+    let (tx, rx) = mpsc::channel::<Entry>();
 
     walker.run(|| {
         let tx = tx.clone();
@@ -173,7 +167,7 @@ fn build_entries(
                     .unwrap_or(0);
 
                 // Ignore send errors if receiver is gone
-                if tx.send((path, is_dir_flag, modified)).is_err() {
+                if tx.send((modified, path, is_dir_flag)).is_err() {
                     return ignore::WalkState::Quit;
                 }
             }
@@ -183,10 +177,10 @@ fn build_entries(
     drop(tx);
 
     // Drain channel
-    let mut results: Vec<(PathBuf, bool, i128)> = rx.into_iter().collect();
+    let mut results: Vec<Entry> = rx.into_iter().collect();
 
     // Remove the walk target itself if present
-    results.retain(|(path, _, _)| path != current_dir);
+    results.retain(|(_, path, _)| path != current_dir);
 
     // Sort by mtime DESC; tie-break by path ASC for deterministic ordering across runs
     sort_entries(&mut results);
@@ -288,7 +282,7 @@ fn main() -> io::Result<()> {
 
     let entries = build_entries(dirs_only, max_depth, &prefix_dir, leftover);
 
-    for (path, is_dir, _modified) in &entries {
+    for (_modified, path, is_dir) in &entries {
         let res = if color {
             print_lscolor_path(&mut out, &ls_colors, path, *is_dir)
         } else {
@@ -386,16 +380,34 @@ mod tests {
         let entries = build_entries(false, None, dir.path(), None);
         let names: Vec<String> = entries
             .into_iter()
-            .map(|(p, _is_dir, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|(_, p, _is_dir)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
 
-        // Newest first
-        assert_eq!(names[0], "c.txt");
-        // Tie-break by path ASC for a and b
-        assert!(names[1] <= names[2], "expected tie-break alphabetical: {:?}",
-                names);
-        assert!(names.contains(&"a.txt".to_string()));
-        assert!(names.contains(&"b.txt".to_string()));
+        assert_eq!(names, ["c.txt", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn test_sort_entries_key_asc_then_path_asc() {
+        let mut entries: Vec<Entry> = vec![
+            (2, PathBuf::from("b.txt"), false),
+            (1, PathBuf::from("b.txt"), false),
+            (1, PathBuf::from("a.txt"), false),
+        ];
+
+        sort_entries(&mut entries);
+
+        let ordered: Vec<_> = entries
+            .into_iter()
+            .map(|(modified, path, _is_dir)| (modified, path))
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                (1, PathBuf::from("a.txt")),
+                (1, PathBuf::from("b.txt")),
+                (2, PathBuf::from("b.txt")),
+            ]
+        );
     }
 
     #[test]
@@ -407,10 +419,10 @@ mod tests {
         write_file(&f1, b"x");
 
         let entries = build_entries(true, None, dir.path(), None);
-        assert!(entries.iter().all(|(_, is_dir, _)| *is_dir));
+        assert!(entries.iter().all(|(_, _, is_dir)| *is_dir));
         let names: Vec<_> = entries
             .iter()
-            .map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|(_, p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(names.contains(&"dir1".to_string()));
         assert!(!names.contains(&"file1".to_string()));
@@ -432,7 +444,7 @@ mod tests {
         let entries = build_entries(false, None, dir.path(), Some("a".to_string()));
         let rels: Vec<String> = entries
             .iter()
-            .map(|(p, _, _)| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
+            .map(|(_, p, _)| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
             .collect();
 
         // Should include only under a1/ or a2/, not b1/
@@ -455,7 +467,7 @@ mod tests {
         let entries = build_entries(false, Some(1), dir.path(), None);
         let names: Vec<_> = entries
             .iter()
-            .map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|(_, p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
 
         assert!(names.contains(&"parent".to_string()));
